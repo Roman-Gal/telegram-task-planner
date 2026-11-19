@@ -101,6 +101,7 @@ export class Store {
   findMember(chatId, username) {
     return this.db.prepare(`SELECT u.* FROM users u JOIN members m ON u.id=m.user_id WHERE m.chat_id=? AND u.username=?`).get(chatId, username.toLowerCase());
   }
+  findUser(username) { return this.db.prepare('SELECT * FROM users WHERE username=?').get(username.toLowerCase()); }
   forgetMember(chatId, userId) { this.db.prepare('DELETE FROM members WHERE chat_id=? AND user_id=?').run(chatId, userId); }
   approveGroup(chatId, ownerId) {
     this.db.prepare('INSERT INTO group_access VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET owner_id=excluded.owner_id,approved_at=excluded.approved_at').run(chatId, ownerId, Date.now());

@@ -40,6 +40,7 @@ export class Planner {
   help() {
     return `📋 <b>Планнер завдань</b>\n\n` +
       `<b>Найзручніше: /menu → ➕ Нове завдання.</b>\nВиконавець → дата → час → опис → пріоритет → нагадування → підтвердження.\n\n` +
+      `Або напишіть <code>/task @username</code> — решту оберете кнопками.\n\n` +
       `Учасники з’являються автоматично з доступних боту повідомлень, меню та подій входу. Для особистих нагадувань відкрийте бота та натисніть /start.\n\n` +
       `<b>Призначити завдання:</b>\n<code>/task @username | завтра 18:30 | Купити масло, хліб, воду</code>\n\n` +
       `Або відповіддю на повідомлення виконавця:\n<code>/task завтра 18:30 | Сходити в Бедронку</code>\n\n` +
@@ -155,6 +156,11 @@ export class Planner {
         case 'task': {
           if (!args) return this.wizard.start(update.update_id, message.from, message.chat.id, message.message_thread_id || 0,
             message.reply_to_message?.sender_chat ? null : message.reply_to_message?.from);
+          const mentioned = (message.entities || []).some(entity => entity.type === 'text_mention' && message.text.slice(entity.offset,entity.offset+entity.length).trim() === args);
+          if (!args.includes('|') && (/^@[a-zA-Z0-9_]{1,32}$/.test(args) || mentioned)) {
+            const user = await this.resolveMention(message, args);
+            return this.wizard.start(update.update_id, message.from, message.chat.id, message.message_thread_id || 0, user);
+          }
           const task = await this.createTask(update, message, args);
           let text = this.card(task, '✅ Створено завдання');
           if (message.chat.id < 0 && !this.store.privateEnabled(task.assignee_id)) {
@@ -198,20 +204,7 @@ export class Planner {
       if (reply.sender_chat) throw new UserError('Неможливо призначити завдання анонімному автору.');
       assignee = reply.from;
     } else {
-      if (message.chat.type === 'private') throw new UserError('Завдання іншій людині створюйте у спільній групі.');
-      if (!/^@[a-zA-Z0-9_]{1,32}$/.test(target)) throw new UserError('Вкажіть @username, me або створіть завдання відповіддю на повідомлення.');
-      const member = this.store.findMember(message.chat.id, target.slice(1));
-      if (!member) throw new UserError('Цього виконавця ще немає серед відомих учасників. Створіть завдання відповіддю на його повідомлення або нехай він скористається меню.');
-      let current;
-      try { current = await this.telegram.call('getChatMember', { chat_id: message.chat.id, user_id: member.id }); }
-      catch (error) {
-        if (error.code === 400 || error.code === 403) throw new UserError('Не вдалося перевірити учасника. Дайте боту права адміністратора або використайте відповідь на повідомлення.');
-        throw error;
-      }
-      if (['left', 'kicked'].includes(current.status) || (current.status === 'restricted' && !current.is_member) || current.user.username?.toLowerCase() !== target.slice(1).toLowerCase()) {
-        throw new UserError('Виконавець змінив username або вийшов із групи. Виберіть його відповіддю на актуальне повідомлення.');
-      }
-      assignee = current.user;
+      assignee = await this.resolveMention(message, target);
     }
     if (!assignee || assignee.is_bot) throw new UserError('Виконавцем має бути людина з видимим профілем.');
     if (message.chat.type === 'private' && assignee.id !== message.from.id) throw new UserError('У приватному чаті можна створювати завдання лише собі.');
@@ -220,6 +213,33 @@ export class Planner {
     this.store.remember(assignee, message.chat.id);
     return this.store.createTask({ updateId: update.update_id, chatId: message.chat.id,
       threadId: message.message_thread_id, creatorId: message.from.id, assigneeId: assignee.id, description, dueAt });
+  }
+  async resolveMention(message, value = message.text.trim()) {
+    const entities = (message.entities || []).filter(entity => entity.type === 'text_mention' && entity.user &&
+      message.text.slice(entity.offset, entity.offset+entity.length).trim() === value);
+    const username = /^@([a-zA-Z0-9_]{1,32})$/.exec(value)?.[1];
+    let candidate;
+    if (entities.length === 1) candidate = entities[0].user;
+    else if (username) candidate = this.store.findMember(message.chat.id, username) || this.store.findUser(username);
+    else throw new UserError('Введіть @ та оберіть одну людину зі списку Telegram. Або використайте /task відповіддю на її повідомлення.');
+    if (!candidate) throw new UserError('Цього виконавця ще немає серед відомих учасників. Нехай він напише будь-яке повідомлення в цій групі або надішліть /task відповіддю на його повідомлення.');
+    if (candidate.is_bot || !Number.isSafeInteger(candidate.id) || candidate.id <= 0) throw new UserError('Виконавцем має бути людина.');
+    if (message.chat.type === 'private') {
+      if (candidate.id !== message.from.id) throw new UserError('Завдання іншій людині створюйте у спільній групі.');
+      return message.from;
+    }
+    let member;
+    try { member = await this.telegram.call('getChatMember', { chat_id: message.chat.id, user_id: candidate.id }); }
+    catch (error) {
+      if (![400,403].includes(error.code)) throw error;
+      throw new UserError('Не вдалося перевірити учасника. Дайте боту права адміністратора або використайте /task відповіддю на повідомлення.');
+    }
+    if (!activeMember(member) || !member.user || member.user.id !== candidate.id || member.user.is_bot ||
+      (username && member.user.username?.toLowerCase() !== username.toLowerCase())) {
+      throw new UserError('Виконавець змінив username або вийшов із групи. Виберіть його відповіддю на актуальне повідомлення.');
+    }
+    this.store.remember(member.user, message.chat.id);
+    return member.user;
   }
   act(id, action, updateId, userId, chatId) {
     if (!Number.isSafeInteger(id) || id <= 0) throw new UserError('Вкажіть числовий ID завдання: /done 1.');

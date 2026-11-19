@@ -36,7 +36,7 @@ export class Wizard {
     this.store.setDraftPanel(draft.id, draft.revision, result.message_id);
   }
   async prompt(draft, text, placeholder) {
-    const previous = draft.stage === 'search' ? 'assignee' : 'hour';
+    const previous = ['search','mention'].includes(draft.stage) ? 'assignee' : 'hour';
     await this.panel(draft, `➕ <b>Нове завдання</b>\n\n${escapeHtml(draft.userName)}, ${text}\nВідповідайте на окремий запит бота нижче.`, [
       [this.button(draft, '⬅️ Назад', 'goto', previous)], [this.button(draft, '✖️ Скасувати', 'cancel')],
     ]);
@@ -70,14 +70,15 @@ export class Wizard {
         if (users.length > 8) navigation.push(b('▶️', 'page', String((d.memberPage || 0) + 1)));
         if (navigation.length) rows.push(navigation);
         if (d.chatId < 0) {
-          if (this.p.username) rows.unshift([{ text: '👥 Обрати людину через Telegram', url: `https://t.me/${this.p.username}?start=pick_${d.id}` }]);
+          rows.unshift([b('👤 Вказати через @', 'mention')]);
           rows.push([b('🔎 Пошук серед відомих', 'search'), b('Відомі учасники', 'all')]);
         }
         return this.panel(d, title + '<b>1/7 · Хто виконавець?</b>\n' +
-          (d.chatId < 0 ? '👥 «Обрати людину через Telegram» відкриє стандартний вибір у приватному чаті з ботом. Оберіть людину, потім поверніться сюди.\n\n' : '') +
+          (d.chatId < 0 ? 'Натисніть «👤 Вказати через @», введіть @ і виберіть учасника в підказках Telegram. Усе відбувається в цій групі.\n\n' : '') +
           (users.length ? 'Або оберіть відомого учасника нижче.' : 'Серед відомих учасників нікого не знайдено.') + '\nЯкщо людини ще немає у списку, також можна написати /task відповіддю на її повідомлення.', [...rows, ...footer()]);
       }
       case 'search': return this.prompt(d, 'напишіть ім’я або username виконавця.', 'Ім’я або username');
+      case 'mention': return this.prompt(d, 'введіть @ та виберіть виконавця в підказках Telegram. Якщо людини немає в підказках, надішліть /task відповіддю на її повідомлення.', '@username або згадка учасника');
       case 'date': {
         const today = todayIn(this.p.config.timezone);
         const month = d.month || today.slice(0, 7);
@@ -162,6 +163,7 @@ export class Wizard {
         }
         case 'page': requireStage('assignee'); if (!/^\d{1,4}$/.test(value)) throw new UserError('Некоректна сторінка.'); draft.memberPage = Number(value); break;
         case 'search': requireStage('assignee'); draft.stage = 'search'; break;
+        case 'mention': requireStage('assignee'); draft.stage = 'mention'; break;
         case 'all': requireStage('assignee'); draft.search = ''; draft.memberPage = 0; break;
         case 'month': {
           requireStage('date');
@@ -264,10 +266,15 @@ export class Wizard {
     const previous = this.store.draftReceipt(update.update_id);
     if (previous && previous.userId === message.from.id && previous.chatId === message.chat.id) { await this.render(previous); return; }
     const d = this.store.replyDraft(message.chat.id, message.from.id, message.message_thread_id || 0, message.reply_to_message?.message_id);
-    if (!d || !['search','timeText','description'].includes(d.stage)) return;
+    if (!d || !['search','mention','timeText','description'].includes(d.stage)) return;
     const text = message.text.trim();
+    const selected = d.stage === 'mention' ? await this.p.resolveMention(message) : null;
     const next = this.store.transitionDraft(d.id, d.revision, update.update_id, draft => {
-      if (draft.stage === 'description') {
+      if (draft.stage === 'mention') {
+        draft.assigneeId = selected.id;
+        draft.assigneeName = [selected.first_name,selected.last_name].filter(Boolean).join(' ') || String(selected.id);
+        draft.stage = 'date';
+      } else if (draft.stage === 'description') {
         if (!text || text.length > 1200) throw new UserError('Опис має містити від 1 до 1200 символів. Спробуйте ще раз відповіддю на запит бота.');
         draft.description = text; draft.stage = 'priority';
       } else if (draft.stage === 'timeText') {

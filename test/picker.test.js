@@ -40,8 +40,9 @@ function setup(t) {
 test('unknown participant can be selected with Telegram native picker and group calendar resumes in its topic',async t=>{
   const s=setup(t);const draft=await s.start();
   assert.equal(s.store.member(chat.id,target.id),undefined);
-  const link=s.panels.get(draft.panelId).reply_markup.inline_keyboard.flat().find(b=>b.url);
-  assert.equal(link.url,`https://t.me/planner_bot?start=pick_${draft.id}`);
+  const buttons=s.panels.get(draft.panelId).reply_markup.inline_keyboard.flat();
+  assert.ok(buttons.some(b=>b.text==='👤 Вказати через @'));
+  assert.ok(!buttons.some(b=>b.url));
   await s.open(draft);
   const keyboard=s.sent.at(-1);
   assert.equal(keyboard.chatId,author.id);
