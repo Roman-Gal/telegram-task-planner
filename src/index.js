@@ -34,11 +34,13 @@ async function main() {
     if (shuttingDown) return;
     planner.username = me.username;
     await telegram.call('setMyCommands', { commands: [
+      { command: 'menu', description: '📋 Меню та створення завдання кнопками' },
       { command: 'help', description: 'Як користуватися планнером' },
       { command: 'join', description: 'Зареєструватися в групі' },
       { command: 'task', description: 'Створити завдання' },
       { command: 'tasks', description: 'Завдання чату' },
       { command: 'mine', description: 'Мої завдання' },
+      { command: 'created', description: 'Створені мною завдання' },
       { command: 'done', description: 'Позначити виконаним: /done ID' },
       { command: 'snooze', description: 'Відкласти на 15 хв: /snooze ID' },
       { command: 'cancel', description: 'Скасувати: /cancel ID' },

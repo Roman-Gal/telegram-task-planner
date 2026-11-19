@@ -1,7 +1,9 @@
 import { parseWhen, formatWhen } from './time.js';
 import { TelegramError } from './telegram.js';
+import { Wizard } from './wizard.js';
+import { escapeHtml, priorities, UserError } from './ui.js';
 
-export const escapeHtml = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+export { escapeHtml } from './ui.js';
 const mention = task => `<a href="tg://user?id=${task.assignee_id}">${escapeHtml(task.assignee_name)}</a>`;
 const buttons = task => ({ inline_keyboard: [[
   { text: '✅ Виконано', callback_data: `done:${task.id}` },
@@ -12,24 +14,71 @@ export class Planner {
   constructor(store, telegram, config, log = console) {
     this.store = store; this.telegram = telegram; this.config = config; this.log = log;
     this.username = ''; this.draining = false; this.reminding = false; this.stopping = false;
+    this.wizard = new Wizard(this);
   }
   allowed(chatId) { return chatId > 0 || !this.config.allowedChatIds.size || this.config.allowedChatIds.has(chatId); }
   help() {
     return `📋 <b>Планнер завдань</b>\n\n` +
-      `1. Кожен учасник пише /join у групі.\n2. Для особистих нагадувань відкрийте бота та натисніть /start.\n\n` +
+      `<b>Найзручніше: /menu → ➕ Нове завдання.</b>\nВиконавець → дата → час → опис → пріоритет → нагадування → підтвердження.\n\n` +
+      `1. Кожен учасник пише /join у групі або натискає «Я учасник» у меню.\n2. Для особистих нагадувань відкрийте бота та натисніть /start.\n\n` +
       `<b>Призначити завдання:</b>\n<code>/task @username | завтра 18:30 | Купити масло, хліб, воду</code>\n\n` +
       `Або відповіддю на повідомлення виконавця:\n<code>/task завтра 18:30 | Сходити в Бедронку</code>\n\n` +
       `Собі: <code>/task me | завтра 18:30 | Купити воду</code>\n` +
       `Дати: <code>YYYY-MM-DD HH:mm</code>, <code>сьогодні HH:mm</code>, <code>завтра HH:mm</code>.\n` +
       `Часовий пояс: <b>${escapeHtml(this.config.timezone)}</b>.\n\n` +
-      `/tasks — відкриті завдання чату\n/mine — мої завдання\n/done ID — виконано\n/snooze ID — нагадати через 15 хв\n/cancel ID — скасувати\n/stop — вимкнути особисті нагадування\n` +
+      `/menu — меню з кнопками\n/tasks — відкриті завдання чату\n/mine — мої завдання\n/created — створені мною\n/done ID — виконано\n/snooze ID — перенести строк на 15 хв\n/cancel ID — скасувати\n/stop — вимкнути особисті нагадування\n` +
       `Для наступної сторінки: <code>/tasks 2</code> або <code>/mine 2</code>.\n\n` +
+      `Нагадування надходять у групу й особисто виконавцю. Після строку — ПРОТЕРМІНОВАНО кожні 15 хв до виконання або скасування.\n\n` +
       `Працюємо у групі або в обговоренні каналу. Анонімні повідомлення не підтримуються.`;
   }
   card(task, heading = '📋 Завдання') {
-    const status = { open: 'відкрите', done: 'виконано', cancelled: 'скасовано' }[task.status];
+    const status = task.status === 'open' && task.due_at <= Date.now() ? '🔴 ПРОТЕРМІНОВАНО' : { open: 'відкрите', done: '✅ виконано', cancelled: 'скасовано' }[task.status];
+    const reminders = JSON.parse(task.reminder_minutes || '[]');
     return `<b>${heading} #${task.id}</b>\n👤 ${mention(task)}\n📝 ${escapeHtml(task.description)}\n` +
-      `⏰ ${escapeHtml(formatWhen(task.due_at, this.config.timezone))}\nСтатус: ${status}`;
+      `⏰ ${escapeHtml(formatWhen(task.due_at, this.config.timezone))}\n${priorities[task.priority || 'medium']} пріоритет\n` +
+      `🔔 Завчасно: ${reminders.length ? reminders.map(m => m === 60 ? '1 год' : m + ' хв').join(', ') : 'без нагадувань'}\nСтатус: ${status}`;
+  }
+  taskButtons(task) { return buttons(task); }
+  menuButtons() {
+    return { inline_keyboard: [
+      [{ text: '➕ Нове завдання', callback_data: 'm:new' }],
+      [{ text: '👤 Мої завдання', callback_data: 'm:mine:0' }, { text: '📋 Завдання групи', callback_data: 'm:tasks:0' }],
+      [{ text: '📤 Створені мною', callback_data: 'm:created:0' }],
+      [{ text: '🙋 Я учасник', callback_data: 'm:join' }, { text: '❓ Довідка', callback_data: 'm:help' }],
+      ...(this.username ? [[{ text: '🔔 Увімкнути приватні нагадування', url: `https://t.me/${this.username}?start=reminders` }]] : []),
+    ] };
+  }
+  menu(chatId, threadId) {
+    return this.telegram.send(chatId, '📋 <b>Планнер завдань</b>\n\nОберіть дію кнопкою. Меню можна закріпити в групі, щоб воно завжди було під рукою.\n\nДля вибору виконавця кожен учасник має натиснути «🙋 Я учасник» або написати /join.', {
+      reply_markup: this.menuButtons(), ...(threadId ? { message_thread_id: threadId } : {}),
+    });
+  }
+  async answer(id, text = '', alert = false) {
+    try { await this.telegram.call('answerCallbackQuery', { callback_query_id: id, text, show_alert: alert }); } catch { /* callbacks expire independently of persisted work */ }
+  }
+  async taskChanged(task, chatId, threadId, heading) {
+    const extra = task.status === 'open' ? { reply_markup: buttons(task) } : {};
+    await this.telegram.send(chatId, this.card(task, heading), { ...extra, ...(threadId ? { message_thread_id: threadId } : {}) });
+    if (task.chat_id < 0 && task.chat_id !== chatId) {
+      await this.telegram.send(task.chat_id, this.card(task, heading), { ...extra, ...(task.thread_id ? { message_thread_id: task.thread_id } : {}) });
+    }
+  }
+  async showTasks(chatId, userId, mode, page, threadId) {
+    if (!Number.isSafeInteger(page) || page < 0 || page > 9999) throw new UserError('Некоректний номер сторінки.');
+    const tasks = this.store.list({ chatId: chatId < 0 ? chatId : undefined,
+      assigneeId: mode === 'mine' || (chatId > 0 && mode === 'tasks') ? userId : undefined,
+      creatorId: mode === 'created' ? userId : undefined, offset: page * 10 });
+    const labels = { tasks: 'Завдання чату', mine: 'Мої завдання', created: 'Створені мною' };
+    const lines = tasks.slice(0,10).map(t => `<b>#${t.id}</b> ${priorities[t.priority].split(' ')[0]} ${mention(t)} — ${escapeHtml(t.description.slice(0,100))}\n⏰ ${escapeHtml(formatWhen(t.due_at, this.config.timezone))}${t.due_at <= Date.now() ? ' · ПРОТЕРМІНОВАНО' : ''}`);
+    const rows = tasks.slice(0,10).map(t => [{ text: `Відкрити #${t.id} · ${t.description.slice(0,35)}`, callback_data: `view:${t.id}` }]);
+    const nav = [];
+    if (page > 0) nav.push({ text: '◀️', callback_data: `m:${mode}:${page-1}:${userId}` });
+    if (tasks.length > 10) nav.push({ text: '▶️', callback_data: `m:${mode}:${page+1}:${userId}` });
+    if (nav.length) rows.push(nav);
+    rows.push([{ text: '➕ Нове завдання', callback_data: 'm:new' }, { text: '🏠 Меню', callback_data: 'm:home' }]);
+    return this.telegram.send(chatId, `<b>📋 ${labels[mode]} · сторінка ${page+1}</b>\n\n${lines.length ? lines.join('\n\n') : 'Відкритих завдань на цій сторінці немає.'}`, {
+      reply_markup: { inline_keyboard: rows }, ...(threadId ? { message_thread_id: threadId } : {}),
+    });
   }
   async handle(update) {
     if (update.callback_query) return this.callback(update);
@@ -37,7 +86,14 @@ export class Planner {
     if (!message?.text || !message.from || message.from.is_bot || message.sender_chat ||
       !['private', 'group', 'supergroup'].includes(message.chat.type) || !this.allowed(message.chat.id)) return;
     const match = /^\/(\w+)(?:@([\w]+))?(?:\s+([\s\S]*))?$/.exec(message.text.trim());
-    if (!match || (match[2] && match[2].toLowerCase() !== this.username.toLowerCase())) return;
+    if (!match) {
+      try { return await this.wizard.text(update, message); }
+      catch (error) {
+        if (!(error instanceof UserError)) throw error;
+        return this.telegram.send(message.chat.id, `ℹ️ ${escapeHtml(error.message)}`, message.message_thread_id ? { message_thread_id: message.message_thread_id } : {});
+      }
+    }
+    if (match[2] && match[2].toLowerCase() !== this.username.toLowerCase()) return;
     const command = match[1].toLowerCase();
     const args = match[3]?.trim() || '';
     this.store.remember(message.from, message.chat.id);
@@ -48,7 +104,8 @@ export class Planner {
       switch (command) {
         case 'start':
           this.store.remember(message.from, message.chat.id, message.chat.type === 'private');
-          return send(this.help());
+          return this.menu(message.chat.id, message.message_thread_id);
+        case 'menu': return this.menu(message.chat.id, message.message_thread_id);
         case 'help': return send(this.help());
         case 'join': return send('✅ Вас зареєстровано в цьому чаті. Можна призначати завдання відповіддю на ваше повідомлення або через @username.');
         case 'stop':
@@ -56,6 +113,7 @@ export class Planner {
           this.store.disablePrivate(message.from.id);
           return send('Особисті нагадування вимкнено. Групові залишаються активними. Увімкнути знову: /start.');
         case 'task': {
+          if (!args) return this.wizard.start(update.update_id, message.from, message.chat.id, message.message_thread_id || 0);
           const task = await this.createTask(update, message, args);
           let text = this.card(task, '✅ Створено завдання');
           if (message.chat.id < 0 && !this.store.privateEnabled(task.assignee_id)) {
@@ -65,20 +123,15 @@ export class Planner {
           return send(text, { reply_markup: buttons(task) });
         }
         case 'tasks':
-        case 'mine': {
+        case 'mine': case 'created': {
           const page = args ? Number(args) : 1;
           if (!Number.isSafeInteger(page) || page < 1 || page > 10000) throw new UserError('Номер сторінки має бути від 1 до 10000.');
-          const personal = message.chat.type === 'private';
-          const tasks = this.store.list({ chatId: personal ? undefined : message.chat.id,
-            assigneeId: command === 'mine' || personal ? message.from.id : undefined, offset: (page - 1) * 10 });
-          if (!tasks.length) return send('Відкритих завдань на цій сторінці немає.');
-          const lines = tasks.slice(0, 10).map(t => `<b>#${t.id}</b> ${mention(t)} — ${escapeHtml(t.description.slice(0, 100))}\n⏰ ${escapeHtml(formatWhen(t.due_at, this.config.timezone))}`);
-          return send(`<b>📋 Завдання · сторінка ${page}</b>\n\n${lines.join('\n\n')}` + (tasks.length > 10 ? `\n\nДалі: /${command} ${page + 1}` : ''));
+          return this.showTasks(message.chat.id, message.from.id, command, page-1, message.message_thread_id);
         }
         case 'done': case 'cancel': case 'snooze': {
+          if (command === 'cancel' && !args) return await this.wizard.cancel(update.update_id, message.from.id, message.chat.id, message.message_thread_id || 0);
           const task = this.act(Number(args), command, update.update_id, message.from.id, message.chat.id);
-          return send(this.card(task, command === 'snooze' ? '⏰ Відкладено на 15 хв' : '📋 Оновлено завдання'),
-            task.status === 'open' ? { reply_markup: buttons(task) } : {});
+          return this.taskChanged(task, message.chat.id, message.message_thread_id, command === 'snooze' ? '⏰ Відкладено на 15 хв' : '📋 Оновлено завдання');
         }
         default: return send('Невідома команда. /help — довідка.');
       }
@@ -140,6 +193,35 @@ export class Planner {
   async callback(update) {
     const q = update.callback_query;
     if (!q.from || q.from.is_bot || !q.message?.chat || !this.allowed(q.message.chat.id)) return;
+    if (!['private','group','supergroup'].includes(q.message.chat.type || (q.message.chat.id > 0 ? 'private' : 'supergroup'))) return;
+    try {
+      if (await this.wizard.callback(update)) return;
+      if (q.data?.startsWith('m:')) {
+        const match = /^m:(new|home|mine|tasks|created|join|help)(?::(\d+))?(?::(\d+))?$/.exec(q.data);
+        if (!match) return;
+        const [, action, page = '0', owner] = match;
+        if (owner && Number(owner) !== q.from.id) throw new UserError('Це список іншої людини. Відкрийте власний через меню.');
+        this.store.remember(q.from, q.message.chat.id);
+        await this.answer(q.id);
+        switch (action) {
+          case 'new': return this.wizard.start(update.update_id, q.from, q.message.chat.id, q.message.message_thread_id || 0);
+          case 'home': return this.menu(q.message.chat.id, q.message.message_thread_id);
+          case 'join': return this.telegram.send(q.message.chat.id, `✅ ${escapeHtml(q.from.first_name)}, вас додано до списку виконавців.`, { reply_markup: this.menuButtons(), ...(q.message.message_thread_id ? { message_thread_id: q.message.message_thread_id } : {}) });
+          case 'help': return this.telegram.send(q.message.chat.id, this.help(), q.message.message_thread_id ? { message_thread_id: q.message.message_thread_id } : {});
+          default: return this.showTasks(q.message.chat.id, q.from.id, action, Number(page), q.message.message_thread_id);
+        }
+      }
+      const view = /^view:(\d+)$/.exec(q.data || '');
+      if (view) {
+        const task = this.store.task(Number(view[1]));
+        if (!task || !this.allowed(task.chat_id) || (q.message.chat.id < 0 ? task.chat_id !== q.message.chat.id : task.creator_id !== q.from.id && task.assignee_id !== q.from.id)) throw new UserError('Завдання не знайдено або у вас немає доступу.');
+        await this.answer(q.id);
+        return this.telegram.send(q.message.chat.id, this.card(task), { ...(task.status === 'open' ? { reply_markup: buttons(task) } : {}), ...(q.message.message_thread_id ? { message_thread_id: q.message.message_thread_id } : {}) });
+      }
+    } catch (error) {
+      if (!(error instanceof UserError)) throw error;
+      return this.answer(q.id, error.message, true);
+    }
     const match = /^(done|cancel|snooze):(\d+)$/.exec(q.data || '');
     if (!match) return;
     let task;
@@ -150,10 +232,7 @@ export class Planner {
       return;
     }
     try { await this.telegram.call('answerCallbackQuery', { callback_query_id: q.id, text: 'Збережено ✅' }); } catch { /* expired callback */ }
-    return this.telegram.send(q.message.chat.id, this.card(task, match[1] === 'snooze' ? '⏰ Відкладено на 15 хв' : '📋 Оновлено завдання'), {
-      ...(q.message.message_thread_id ? { message_thread_id: q.message.message_thread_id } : {}),
-      ...(task.status === 'open' ? { reply_markup: buttons(task) } : {}),
-    });
+    return this.taskChanged(task, q.message.chat.id, q.message.message_thread_id, match[1] === 'snooze' ? '⏰ Відкладено на 15 хв' : '📋 Оновлено завдання');
   }
   async drain() {
     if (this.draining || this.stopping) return;
@@ -184,13 +263,14 @@ export class Planner {
           this.store.deliveryResult(delivery, 403); continue;
         }
         try {
-          await this.telegram.send(delivery.chat_id, this.card(task, '🔔 Нагадування'), {
+          const heading = delivery.kind === 'overdue' ? '🔴 ПРОТЕРМІНОВАНО' : `🔔 До строку: ${Math.round((task.due_at-delivery.event_at)/60_000)} хв`;
+          await this.telegram.send(delivery.chat_id, this.card(task, heading), {
             ...(delivery.thread_id ? { message_thread_id: delivery.thread_id } : {}), reply_markup: buttons(task),
           });
-          this.store.deliveryResult(delivery);
+          this.store.deliveryResult(delivery, null, 0, now);
         } catch (error) {
           const code = error instanceof TelegramError ? error.code : 500;
-          this.store.deliveryResult(delivery, code, error.retryAfter);
+          this.store.deliveryResult(delivery, code, error.retryAfter, now);
           if (delivery.destination === 'private' && code === 403) this.store.disablePrivate(task.assignee_id);
           this.log.warn(`Reminder ${task.id}/${delivery.destination}: failure code ${code}; retry policy applied.`);
         }
@@ -198,5 +278,3 @@ export class Planner {
     } finally { this.reminding = false; }
   }
 }
-
-class UserError extends Error {}

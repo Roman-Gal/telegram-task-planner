@@ -41,3 +41,14 @@ export function parseWhen(input, timezone, now = Date.now()) {
 export function formatWhen(timestamp, timezone) {
   return new Intl.DateTimeFormat('uk-UA', { timeZone: timezone, dateStyle: 'short', timeStyle: 'short' }).format(timestamp) + ` (${timezone})`;
 }
+
+export function localDate(timestamp, timezone) {
+  const p = parts(timestamp, timezone);
+  return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+}
+
+export function addDays(date, days) {
+  const result = new Date(date + 'T12:00:00Z');
+  result.setUTCDate(result.getUTCDate() + days);
+  return result.toISOString().slice(0, 10);
+}

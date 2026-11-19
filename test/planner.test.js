@@ -156,13 +156,15 @@ test('completion suppresses reminders; snooze is idempotent and creates a new re
   assert.equal(sent.length, 0);
 });
 test('callbacks enforce identity and permit the assignee to mark a task done privately', async t => {
-  const { planner, store } = setup(t);
+  const { planner, store, sent } = setup(t);
   await create(planner);
   const callback = (id, from) => ({ update_id: id, callback_query: { id: `q${id}`, from, data: 'done:1', message: { chat: { id: from.id } } } });
   await planner.handle(callback(2, stranger));
   assert.equal(store.task(1).status, 'open');
   await planner.handle(callback(3, assignee));
   assert.equal(store.task(1).status, 'done');
+  assert.deepEqual(sent.slice(-2).map(m=>m.chatId),[assignee.id,-100]);
+  assert.match(sent.at(-1).text,/виконано/);
 });
 test('SQLite recovers pending webhook and overdue reminder after reopening', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'planner-'));
