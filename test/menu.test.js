@@ -19,6 +19,7 @@ function setup(t) {
     async send(chatId, text, extra = {}) { const message_id = ++id; const m = { message_id, chatId, text, ...extra }; messages.set(message_id, m); sent.push(m); return { message_id }; },
     async call(method, body) {
       if (method === 'editMessageText') { messages.set(body.message_id, { ...messages.get(body.message_id), ...body }); return true; }
+      if (method === 'editMessageReplyMarkup') { messages.set(body.message_id, { ...messages.get(body.message_id), reply_markup: body.reply_markup }); return true; }
       if (method === 'answerCallbackQuery') answers.push(body);
       return true;
     },
@@ -153,4 +154,30 @@ test('draft prompt, ownership, and expiry survive reopening the database', t => 
   assert.equal(store.replyDraft(chat.id,author.id,55,999).id,d.id);
   assert.equal(store.replyDraft(chat.id,buyer.id,55,999),undefined);
   assert.equal(store.draft(d.id,d.expiresAt+1),undefined);
+});
+test('search replaces old participant buttons with working back/cancel controls', async t => {
+  const s=setup(t); await s.start();
+  const old=s.messages.get(s.active().panelId).reply_markup.inline_keyboard.flat().find(b=>b.text==='Усі учасники').callback_data;
+  await s.press('🔎 Знайти за іменем');
+  const revision=s.active().revision;
+  assert.equal(s.active().stage,'search');
+  const controls=s.messages.get(s.active().panelId).reply_markup.inline_keyboard.flat();
+  assert.deepEqual(controls.map(b=>b.text),['⬅️ Назад','✖️ Скасувати']);
+  assert.ok(controls.every(b=>b.callback_data.includes(`:${revision}:`)));
+  await s.callback(old);
+  assert.equal(s.active().stage,'search');assert.equal(s.active().revision,revision);
+  assert.equal(s.answers.at(-1).show_alert,false);
+  assert.match(s.answers.at(-1).text,/актуальний крок/);
+  await s.press('⬅️ Назад');assert.equal(s.active().stage,'assignee');
+});
+test('text replies remove superseded panel buttons and stale clicks cannot overwrite the answer',async t=>{
+  const s=setup(t);await s.toDescription();
+  const oldPanel=s.active().panelId;
+  const old=s.messages.get(oldPanel).reply_markup.inline_keyboard.flat()[0].callback_data;
+  await s.reply('Поточний опис');
+  assert.equal(s.active().stage,'priority');
+  assert.deepEqual(s.messages.get(oldPanel).reply_markup.inline_keyboard,[]);
+  await s.callback(old);
+  assert.equal(s.active().stage,'priority');assert.equal(s.active().description,'Поточний опис');
+  assert.equal(s.answers.at(-1).show_alert,false);
 });

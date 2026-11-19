@@ -35,6 +35,10 @@ export class Wizard {
     this.store.setDraftPanel(draft.id, draft.revision, result.message_id);
   }
   async prompt(draft, text, placeholder) {
+    const previous = draft.stage === 'search' ? 'assignee' : 'hour';
+    await this.panel(draft, `➕ <b>Нове завдання</b>\n\n${escapeHtml(draft.userName)}, ${text}\nВідповідайте на окремий запит бота нижче.`, [
+      [this.button(draft, '⬅️ Назад', 'goto', previous)], [this.button(draft, '✖️ Скасувати', 'cancel')],
+    ]);
     if (draft.promptId) return;
     const result = await this.p.telegram.send(draft.chatId,
       `<a href="tg://user?id=${draft.userId}">${escapeHtml(draft.userName)}</a>, ${text}\n\nВідповідайте саме на це повідомлення. /cancel — скасувати чернетку.`, {
@@ -42,6 +46,11 @@ export class Wizard {
         ...(draft.threadId ? { message_thread_id: draft.threadId } : {}),
       });
     this.store.setDraftPrompt(draft.id, draft.revision, result.message_id);
+  }
+  async clearPanel(chatId, panelId) {
+    if (!panelId) return;
+    try { await this.p.telegram.call('editMessageReplyMarkup', { chat_id: chatId, message_id: panelId, reply_markup: { inline_keyboard: [] } }); }
+    catch { /* A deleted or already edited old panel must not block the current step. */ }
   }
   async render(snapshot) {
     const current = this.store.draft(snapshot.id);
@@ -123,7 +132,11 @@ export class Wizard {
     if (d.userId !== q.from.id) throw new UserError('Цю чернетку створює інша людина. Відкрийте власну через /menu.');
     const receipt = this.store.draftReceipt(update.update_id);
     if (receipt) { await this.p.answer(q.id); await this.render(receipt); return true; }
-    if (d.revision !== Number(revText) || ['created','cancelled'].includes(d.stage)) throw new UserError('Ця кнопка застаріла. Використайте поточний крок або /menu.');
+    if (d.revision !== Number(revText) || ['created','cancelled'].includes(d.stage)) {
+      await this.p.answer(q.id, d.stage === 'created' ? 'Завдання вже створене.' : d.stage === 'cancelled' ? 'Чернетку вже скасовано.' : 'Показую актуальний крок. Попередню дію не повторено.');
+      await this.render(d);
+      return true;
+    }
     if (action === 'noop') { await this.p.answer(q.id); return true; }
     const next = this.store.transitionDraft(id, Number(revText), update.update_id, draft => {
       const requireStage = (...stages) => { if (!stages.includes(draft.stage)) throw new UserError('Поверніться до поточного кроку.'); };
@@ -211,7 +224,10 @@ export class Wizard {
       }
       delete draft.panelId;
     });
-    if (next) await this.render(next);
+    if (next) {
+      await this.clearPanel(d.chatId, d.panelId);
+      await this.render(next);
+    }
   }
   async cancel(updateId, userId, chatId, threadId = 0) {
     const draft = this.store.activeDraft(chatId, userId, threadId);
