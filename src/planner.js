@@ -2,6 +2,7 @@ import { parseWhen, formatWhen } from './time.js';
 import { TelegramError } from './telegram.js';
 import { Wizard } from './wizard.js';
 import { escapeHtml, priorities, UserError } from './ui.js';
+import { Access, activeMember } from './access.js';
 
 export { escapeHtml } from './ui.js';
 const mention = task => `<a href="tg://user?id=${task.assignee_id}">${escapeHtml(task.assignee_name)}</a>`;
@@ -15,12 +16,31 @@ export class Planner {
     this.store = store; this.telegram = telegram; this.config = config; this.log = log;
     this.username = ''; this.draining = false; this.reminding = false; this.stopping = false;
     this.wizard = new Wizard(this);
+    this.access = new Access(store, telegram, config);
+    this.adminSyncAt = new Map();
   }
-  allowed(chatId) { return chatId > 0 || !this.config.allowedChatIds.size || this.config.allowedChatIds.has(chatId); }
+  allowed(chatId) { return this.access.allowed(chatId); }
+  observe(message) {
+    if (!this.allowed(message.chat.id)) return;
+    if (!message.sender_chat) this.store.remember(message.from, message.chat.id);
+    if (!message.reply_to_message?.sender_chat) this.store.remember(message.reply_to_message?.from, message.chat.id);
+    for (const user of message.new_chat_members || []) this.store.remember(user, message.chat.id);
+    if (message.left_chat_member) this.store.forgetMember(message.chat.id, message.left_chat_member.id);
+  }
+  async syncAdministrators(chatId) {
+    if (chatId > 0 || !this.allowed(chatId) || (this.adminSyncAt.get(chatId) || 0) > Date.now()-300_000) return;
+    try {
+      const admins = await this.telegram.call('getChatAdministrators', { chat_id: chatId });
+      if (Array.isArray(admins)) {
+        for (const member of admins) this.store.remember(member.user, chatId);
+        this.adminSyncAt.set(chatId, Date.now());
+      }
+    } catch { /* Discovery is optional; known participants and reply assignment remain available. */ }
+  }
   help() {
     return `📋 <b>Планнер завдань</b>\n\n` +
       `<b>Найзручніше: /menu → ➕ Нове завдання.</b>\nВиконавець → дата → час → опис → пріоритет → нагадування → підтвердження.\n\n` +
-      `1. Кожен учасник пише /join у групі або натискає «Я учасник» у меню.\n2. Для особистих нагадувань відкрийте бота та натисніть /start.\n\n` +
+      `Учасники з’являються автоматично з доступних боту повідомлень, меню та подій входу. Для особистих нагадувань відкрийте бота та натисніть /start.\n\n` +
       `<b>Призначити завдання:</b>\n<code>/task @username | завтра 18:30 | Купити масло, хліб, воду</code>\n\n` +
       `Або відповіддю на повідомлення виконавця:\n<code>/task завтра 18:30 | Сходити в Бедронку</code>\n\n` +
       `Собі: <code>/task me | завтра 18:30 | Купити воду</code>\n` +
@@ -44,12 +64,12 @@ export class Planner {
       [{ text: '➕ Нове завдання', callback_data: 'm:new' }],
       [{ text: '👤 Мої завдання', callback_data: 'm:mine:0' }, { text: '📋 Завдання групи', callback_data: 'm:tasks:0' }],
       [{ text: '📤 Створені мною', callback_data: 'm:created:0' }],
-      [{ text: '🙋 Я учасник', callback_data: 'm:join' }, { text: '❓ Довідка', callback_data: 'm:help' }],
+      [{ text: '❓ Довідка', callback_data: 'm:help' }],
       ...(this.username ? [[{ text: '🔔 Увімкнути приватні нагадування', url: `https://t.me/${this.username}?start=reminders` }]] : []),
     ] };
   }
   menu(chatId, threadId) {
-    return this.telegram.send(chatId, '📋 <b>Планнер завдань</b>\n\nОберіть дію кнопкою. Меню можна закріпити в групі, щоб воно завжди було під рукою.\n\nДля вибору виконавця кожен учасник має натиснути «🙋 Я учасник» або написати /join.', {
+    return this.telegram.send(chatId, '📋 <b>Планнер завдань</b>\n\nОберіть дію кнопкою. Меню можна закріпити в групі, щоб воно завжди було під рукою.\n\nУчасники додаються до списку виконавців автоматично.', {
       reply_markup: this.menuButtons(), ...(threadId ? { message_thread_id: threadId } : {}),
     });
   }
@@ -81,8 +101,23 @@ export class Planner {
     });
   }
   async handle(update) {
+    if (update.my_chat_member) return this.access.membership(update.my_chat_member);
+    if (update.chat_member) {
+      const event = update.chat_member;
+      if (event.chat && this.allowed(event.chat.id) && ['group','supergroup'].includes(event.chat.type)) {
+        if (activeMember(event.new_chat_member)) this.store.remember(event.new_chat_member.user, event.chat.id);
+        else if (event.new_chat_member?.user) this.store.forgetMember(event.chat.id, event.new_chat_member.user.id);
+      }
+      return;
+    }
     if (update.callback_query) return this.callback(update);
     const message = update.message;
+    if (!message?.chat || !['private','group','supergroup'].includes(message.chat.type)) return;
+    if (message.text?.trim().match(new RegExp(`^/allow(?:@${this.username})?$`, 'i')) && !message.sender_chat && !message.from?.is_bot && this.access.authorize(message.chat.id, message.from?.id)) {
+      this.observe(message);
+      return this.telegram.send(message.chat.id, '✅ Цю групу дозволено власником бота.', { reply_markup: this.menuButtons(), ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}) });
+    }
+    this.observe(message);
     if (!message?.text || !message.from || message.from.is_bot || message.sender_chat ||
       !['private', 'group', 'supergroup'].includes(message.chat.type) || !this.allowed(message.chat.id)) return;
     const match = /^\/(\w+)(?:@([\w]+))?(?:\s+([\s\S]*))?$/.exec(message.text.trim());
@@ -107,13 +142,14 @@ export class Planner {
           return this.menu(message.chat.id, message.message_thread_id);
         case 'menu': return this.menu(message.chat.id, message.message_thread_id);
         case 'help': return send(this.help());
-        case 'join': return send('✅ Вас зареєстровано в цьому чаті. Можна призначати завдання відповіддю на ваше повідомлення або через @username.');
+        case 'id': return send(`Ваш Telegram user ID: <code>${message.from.id}</code>`);
         case 'stop':
           if (message.chat.type !== 'private') throw new UserError('Напишіть /stop в особистому чаті з ботом.');
           this.store.disablePrivate(message.from.id);
           return send('Особисті нагадування вимкнено. Групові залишаються активними. Увімкнути знову: /start.');
         case 'task': {
-          if (!args) return this.wizard.start(update.update_id, message.from, message.chat.id, message.message_thread_id || 0);
+          if (!args) return this.wizard.start(update.update_id, message.from, message.chat.id, message.message_thread_id || 0,
+            message.reply_to_message?.sender_chat ? null : message.reply_to_message?.from);
           const task = await this.createTask(update, message, args);
           let text = this.card(task, '✅ Створено завдання');
           if (message.chat.id < 0 && !this.store.privateEnabled(task.assignee_id)) {
@@ -160,7 +196,7 @@ export class Planner {
       if (message.chat.type === 'private') throw new UserError('Завдання іншій людині створюйте у спільній групі.');
       if (!/^@[a-zA-Z0-9_]{1,32}$/.test(target)) throw new UserError('Вкажіть @username, me або створіть завдання відповіддю на повідомлення.');
       const member = this.store.findMember(message.chat.id, target.slice(1));
-      if (!member) throw new UserError('Нехай виконавець напише /join у цій групі. Або створіть завдання відповіддю на його повідомлення.');
+      if (!member) throw new UserError('Цього виконавця ще немає серед відомих учасників. Створіть завдання відповіддю на його повідомлення або нехай він скористається меню.');
       let current;
       try { current = await this.telegram.call('getChatMember', { chat_id: message.chat.id, user_id: member.id }); }
       catch (error) {
@@ -168,7 +204,7 @@ export class Planner {
         throw error;
       }
       if (['left', 'kicked'].includes(current.status) || (current.status === 'restricted' && !current.is_member) || current.user.username?.toLowerCase() !== target.slice(1).toLowerCase()) {
-        throw new UserError('Виконавець змінив username або вийшов із групи. Попросіть його знову написати /join.');
+        throw new UserError('Виконавець змінив username або вийшов із групи. Виберіть його відповіддю на актуальне повідомлення.');
       }
       assignee = current.user;
     }
@@ -195,6 +231,7 @@ export class Planner {
     if (!q.from || q.from.is_bot || !q.message?.chat || !this.allowed(q.message.chat.id)) return;
     if (!['private','group','supergroup'].includes(q.message.chat.type || (q.message.chat.id > 0 ? 'private' : 'supergroup'))) return;
     try {
+      this.store.remember(q.from, q.message.chat.id);
       if (await this.wizard.callback(update)) return;
       if (q.data?.startsWith('m:')) {
         const match = /^m:(new|home|mine|tasks|created|join|help)(?::(\d+))?(?::(\d+))?$/.exec(q.data);
@@ -206,7 +243,7 @@ export class Planner {
         switch (action) {
           case 'new': return this.wizard.start(update.update_id, q.from, q.message.chat.id, q.message.message_thread_id || 0);
           case 'home': return this.menu(q.message.chat.id, q.message.message_thread_id);
-          case 'join': return this.telegram.send(q.message.chat.id, `✅ ${escapeHtml(q.from.first_name)}, вас додано до списку виконавців.`, { reply_markup: this.menuButtons(), ...(q.message.message_thread_id ? { message_thread_id: q.message.message_thread_id } : {}) });
+          case 'join': return this.menu(q.message.chat.id, q.message.message_thread_id); // Older pinned menus still open the updated menu.
           case 'help': return this.telegram.send(q.message.chat.id, this.help(), q.message.message_thread_id ? { message_thread_id: q.message.message_thread_id } : {});
           default: return this.showTasks(q.message.chat.id, q.from.id, action, Number(page), q.message.message_thread_id);
         }

@@ -6,9 +6,19 @@ const todayIn = zone => localDate(Date.now(), zone);
 
 export class Wizard {
   constructor(planner) { this.p = planner; this.store = planner.store; }
-  async start(updateId, user, chatId, threadId = 0) {
+  async start(updateId, user, chatId, threadId = 0, replyUser = null) {
     this.store.remember(user, chatId);
-    return this.render(this.store.beginDraft(updateId, user, chatId, threadId));
+    await this.p.syncAdministrators(chatId);
+    let draft = this.store.beginDraft(updateId, user, chatId, threadId);
+    if (replyUser && !replyUser.is_bot && (chatId < 0 || replyUser.id === user.id) && draft.stage === 'assignee' && draft.revision === 0) {
+      this.store.remember(replyUser, chatId);
+      draft = this.store.transitionDraft(draft.id, 0, updateId, d => {
+        d.assigneeId = replyUser.id;
+        d.assigneeName = [replyUser.first_name, replyUser.last_name].filter(Boolean).join(' ') || String(replyUser.id);
+        d.stage = 'date';
+      });
+    }
+    return this.render(draft);
   }
   button(draft, text, action, value = '') {
     return { text, callback_data: `w:${draft.id}:${draft.revision}:${action}:${value}` };
@@ -50,7 +60,7 @@ export class Wizard {
         if (users.length > 8) navigation.push(b('▶️', 'page', String((d.memberPage || 0) + 1)));
         if (navigation.length) rows.push(navigation);
         if (d.chatId < 0) rows.push([b('🔎 Знайти за іменем', 'search'), b('Усі учасники', 'all')]);
-        return this.panel(d, title + '<b>1/7 · Хто виконавець?</b>\n' + (users.length ? 'Оберіть людину кнопкою.' : 'Нікого не знайдено.') + '\nУчасник з’явиться у списку після /join у цій групі.', [...rows, ...footer()]);
+        return this.panel(d, title + '<b>1/7 · Хто виконавець?</b>\n' + (users.length ? 'Оберіть людину кнопкою.' : 'Нікого не знайдено.') + '\nСписок оновлюється автоматично з доступних боту повідомлень і дій учасників. Також можна запустити /task відповіддю на повідомлення виконавця.', [...rows, ...footer()]);
       }
       case 'search': return this.prompt(d, 'напишіть ім’я або username виконавця.', 'Ім’я або username');
       case 'date': {
@@ -128,7 +138,7 @@ export class Wizard {
         case 'user': {
           requireStage('assignee');
           const user = draft.chatId > 0 ? (Number(value) === draft.userId ? { id: draft.userId, name: draft.userName } : null) : this.store.member(draft.chatId, Number(value));
-          if (!user) throw new UserError('Учасника не знайдено. Нехай напише /join у групі.');
+          if (!user) throw new UserError('Учасника більше немає у списку. Оберіть іншу людину або створіть завдання відповіддю на повідомлення.');
           draft.assigneeId = user.id; draft.assigneeName = user.name; draft.stage = 'date'; break;
         }
         case 'page': requireStage('assignee'); if (!/^\d{1,4}$/.test(value)) throw new UserError('Некоректна сторінка.'); draft.memberPage = Number(value); break;

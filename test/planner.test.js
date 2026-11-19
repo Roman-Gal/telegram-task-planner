@@ -43,8 +43,8 @@ test('reply assignment escapes HTML and duplicate updates create one task', asyn
 test('username assignment requires a known member and verifies the current username', async t => {
   const { planner, store, sent, telegram } = setup(t);
   await planner.handle(message(1, '/task @buyer | завтра 18:30 | Купити воду'));
-  assert.match(sent.at(-1).text, /\/join/);
-  await planner.handle(message(2, '/join', assignee));
+  assert.match(sent.at(-1).text, /відомих учасників/);
+  await planner.handle(message(2, 'Звичайне повідомлення', assignee));
   await planner.handle(message(3, '/task @buyer | завтра 18:30 | Купити воду'));
   assert.equal(store.task(1).assignee_id, assignee.id);
   telegram.call = async () => ({ status: 'member', user: { ...assignee, username: 'changed' } });

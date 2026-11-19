@@ -45,6 +45,7 @@ export class Store {
         body TEXT NOT NULL, expires_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS wizard_receipts (update_id INTEGER PRIMARY KEY, body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS group_access (chat_id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL, approved_at INTEGER NOT NULL);
     `);
     this.migrate();
   }
@@ -95,6 +96,15 @@ export class Store {
   }
   findMember(chatId, username) {
     return this.db.prepare(`SELECT u.* FROM users u JOIN members m ON u.id=m.user_id WHERE m.chat_id=? AND u.username=?`).get(chatId, username.toLowerCase());
+  }
+  forgetMember(chatId, userId) { this.db.prepare('DELETE FROM members WHERE chat_id=? AND user_id=?').run(chatId, userId); }
+  approveGroup(chatId, ownerId) {
+    this.db.prepare('INSERT INTO group_access VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET owner_id=excluded.owner_id,approved_at=excluded.approved_at').run(chatId, ownerId, Date.now());
+  }
+  groupApproved(chatId, ownerId) { return Boolean(this.db.prepare('SELECT 1 FROM group_access WHERE chat_id=? AND owner_id=?').get(chatId, ownerId)); }
+  groupDenied(chatId) { return Boolean(this.db.prepare('SELECT 1 FROM group_access WHERE chat_id=? AND owner_id=0').get(chatId)); }
+  revokeGroup(chatId) {
+    this.db.prepare('INSERT INTO group_access VALUES(?,0,?) ON CONFLICT(chat_id) DO UPDATE SET owner_id=0,approved_at=excluded.approved_at').run(chatId, Date.now());
   }
   members(chatId, search = '', page = 0) {
     const query = search.toLocaleLowerCase('uk');

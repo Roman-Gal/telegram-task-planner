@@ -16,6 +16,8 @@ export function loadConfig(env = process.env) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Некоректний PORT.');
   const allowedChatIds = (env.ALLOWED_CHAT_IDS || '').split(',').map(x => x.trim()).filter(Boolean).map(Number);
   if (allowedChatIds.some(x => !Number.isSafeInteger(x))) throw new Error('ALLOWED_CHAT_IDS має містити числові ID чатів.');
+  const ownerUserId = env.OWNER_USER_ID?.trim() ? Number(env.OWNER_USER_ID) : null;
+  if (ownerUserId !== null && (!Number.isSafeInteger(ownerUserId) || ownerUserId <= 0)) throw new Error('OWNER_USER_ID має бути додатним числовим Telegram user ID.');
   return { token, secret, timezone, port, host: env.HOST || '127.0.0.1', publicUrl: url.origin,
-    databasePath: resolve(env.DATABASE_PATH || './data/planner.sqlite'), allowedChatIds: new Set(allowedChatIds) };
+    databasePath: resolve(env.DATABASE_PATH || './data/planner.sqlite'), allowedChatIds: new Set(allowedChatIds), ownerUserId };
 }

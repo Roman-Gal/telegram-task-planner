@@ -33,10 +33,11 @@ async function main() {
     const me = await telegram.call('getMe');
     if (shuttingDown) return;
     planner.username = me.username;
+    planner.access.botId = me.id;
     await telegram.call('setMyCommands', { commands: [
       { command: 'menu', description: '📋 Меню та створення завдання кнопками' },
       { command: 'help', description: 'Як користуватися планнером' },
-      { command: 'join', description: 'Зареєструватися в групі' },
+      { command: 'id', description: 'Показати мій числовий Telegram ID' },
       { command: 'task', description: 'Створити завдання' },
       { command: 'tasks', description: 'Завдання чату' },
       { command: 'mine', description: 'Мої завдання' },
@@ -54,7 +55,7 @@ async function main() {
     if (shuttingDown) return;
     await telegram.call('setWebhook', {
       url: config.publicUrl + WEBHOOK_PATH, secret_token: config.secret,
-      allowed_updates: ['message', 'callback_query'], max_connections: 10, drop_pending_updates: false,
+      allowed_updates: ['message', 'callback_query', 'my_chat_member', 'chat_member'], max_connections: 10, drop_pending_updates: false,
     });
     if (shuttingDown) return;
     const tick = () => {
