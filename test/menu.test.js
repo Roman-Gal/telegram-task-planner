@@ -102,7 +102,7 @@ test('concurrent drafts, foreign clicks, stale buttons, replies, and topics stay
 });
 test('member search handles Ukrainian case and selecting users without usernames', async t => {
   const s = setup(t); s.store.remember({ id: 33, first_name: 'Ірина' }, chat.id);
-  await s.start(); await s.press('🔎 Знайти за іменем'); await s.reply('іРИНа');
+  await s.start(); await s.press('🔎 Пошук серед відомих'); await s.reply('іРИНа');
   const panel = s.messages.get(s.active().panelId);
   assert.ok(panel.reply_markup.inline_keyboard.flat().some(b => b.text.includes('Ірина')));
   await s.press(/Ірина/); assert.equal(s.active().assigneeId, 33);
@@ -157,8 +157,8 @@ test('draft prompt, ownership, and expiry survive reopening the database', t => 
 });
 test('search replaces old participant buttons with working back/cancel controls', async t => {
   const s=setup(t); await s.start();
-  const old=s.messages.get(s.active().panelId).reply_markup.inline_keyboard.flat().find(b=>b.text==='Усі учасники').callback_data;
-  await s.press('🔎 Знайти за іменем');
+  const old=s.messages.get(s.active().panelId).reply_markup.inline_keyboard.flat().find(b=>b.text==='Відомі учасники').callback_data;
+  await s.press('🔎 Пошук серед відомих');
   const revision=s.active().revision;
   assert.equal(s.active().stage,'search');
   const controls=s.messages.get(s.active().panelId).reply_markup.inline_keyboard.flat();

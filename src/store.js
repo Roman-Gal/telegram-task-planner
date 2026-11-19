@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomInt } from 'node:crypto';
 
 export class Store {
   constructor(path) {
@@ -46,6 +46,10 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS wizard_receipts (update_id INTEGER PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS group_access (chat_id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL, approved_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS user_picks (
+        request_id INTEGER PRIMARY KEY, draft_id TEXT NOT NULL, user_id INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0
+      );
     `);
     this.migrate();
   }
@@ -212,6 +216,18 @@ export class Store {
     const row = this.db.prepare('SELECT body FROM wizard_receipts WHERE update_id=?').get(updateId);
     return row ? JSON.parse(row.body) : undefined;
   }
+  openUserPick(draft) {
+    const existing = this.db.prepare('SELECT request_id FROM user_picks WHERE draft_id=? AND user_id=? AND expires_at>? AND consumed=0')
+      .get(draft.id, draft.userId, Date.now());
+    if (existing) return existing.request_id;
+    let requestId;
+    do { requestId = randomInt(1, 2_147_483_647); } while (this.db.prepare('SELECT 1 FROM user_picks WHERE request_id=?').get(requestId));
+    this.db.prepare('INSERT INTO user_picks(request_id,draft_id,user_id,expires_at) VALUES(?,?,?,?)')
+      .run(requestId, draft.id, draft.userId, Math.min(draft.expiresAt, Date.now()+600_000));
+    return requestId;
+  }
+  userPick(requestId) { return this.db.prepare('SELECT * FROM user_picks WHERE request_id=? AND expires_at>?').get(requestId, Date.now()); }
+  consumeUserPick(requestId) { this.db.prepare('UPDATE user_picks SET consumed=1 WHERE request_id=?').run(requestId); }
   saveDraft(draft) {
     this.db.prepare(`INSERT INTO drafts VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE
       SET revision=excluded.revision,body=excluded.body,expires_at=excluded.expires_at`)

@@ -1,5 +1,6 @@
 import { parseWhen, localDate, addDays } from './time.js';
 import { escapeHtml, priorities, UserError } from './ui.js';
+import { activeMember } from './access.js';
 
 const splitRows = (items, size) => Array.from({ length: Math.ceil(items.length / size) }, (_, i) => items.slice(i * size, i * size + size));
 const todayIn = zone => localDate(Date.now(), zone);
@@ -68,8 +69,13 @@ export class Wizard {
         if (d.memberPage > 0) navigation.push(b('◀️', 'page', String(d.memberPage - 1)));
         if (users.length > 8) navigation.push(b('▶️', 'page', String((d.memberPage || 0) + 1)));
         if (navigation.length) rows.push(navigation);
-        if (d.chatId < 0) rows.push([b('🔎 Знайти за іменем', 'search'), b('Усі учасники', 'all')]);
-        return this.panel(d, title + '<b>1/7 · Хто виконавець?</b>\n' + (users.length ? 'Оберіть людину кнопкою.' : 'Нікого не знайдено.') + '\nСписок оновлюється автоматично з доступних боту повідомлень і дій учасників. Також можна запустити /task відповіддю на повідомлення виконавця.', [...rows, ...footer()]);
+        if (d.chatId < 0) {
+          if (this.p.username) rows.unshift([{ text: '👥 Обрати людину через Telegram', url: `https://t.me/${this.p.username}?start=pick_${d.id}` }]);
+          rows.push([b('🔎 Пошук серед відомих', 'search'), b('Відомі учасники', 'all')]);
+        }
+        return this.panel(d, title + '<b>1/7 · Хто виконавець?</b>\n' +
+          (d.chatId < 0 ? '👥 «Обрати людину через Telegram» відкриє стандартний вибір у приватному чаті з ботом. Оберіть людину, потім поверніться сюди.\n\n' : '') +
+          (users.length ? 'Або оберіть відомого учасника нижче.' : 'Серед відомих учасників нікого не знайдено.') + '\nЯкщо людини ще немає у списку, також можна написати /task відповіддю на її повідомлення.', [...rows, ...footer()]);
       }
       case 'search': return this.prompt(d, 'напишіть ім’я або username виконавця.', 'Ім’я або username');
       case 'date': {
@@ -204,6 +210,55 @@ export class Wizard {
     await this.p.answer(q.id);
     await this.render(next);
     return true;
+  }
+  async openPicker(draftId, message) {
+    const d = this.store.draft(draftId);
+    if (message.chat.type !== 'private' || message.chat.id !== message.from.id || !d || d.userId !== message.from.id ||
+      d.chatId >= 0 || !this.p.allowed(d.chatId)) throw new UserError('Цей вибір недоступний. Відкрийте нове завдання у своїй групі.');
+    if (d.stage !== 'assignee') throw new UserError('Крок вибору вже завершений. Поверніться до групи або відкрийте там нове завдання.');
+    const requestId = this.store.openUserPick(d);
+    return this.p.telegram.send(message.chat.id,
+      '👥 <b>Оберіть виконавця</b>\n\nНатисніть кнопку внизу біля поля повідомлення та виберіть людину у вікні Telegram. Вона має бути учасником групи, де ви створюєте завдання.\n\nПісля вибору поверніться до групи — там продовжиться створення завдання.', {
+        reply_markup: { keyboard: [[{ text: '👤 Обрати людину', request_users: {
+          request_id: requestId, user_is_bot: false, max_quantity: 1, request_name: true, request_username: true,
+        } }]], resize_keyboard: true, one_time_keyboard: true },
+      });
+  }
+  async picked(update, message) {
+    if (message.chat.type !== 'private' || message.chat.id !== message.from.id) throw new UserError('Вибір користувача доступний тільки у приватному чаті з ботом.');
+    const requestId = message.users_shared.request_id;
+    if (!Number.isSafeInteger(requestId)) throw new UserError('Некоректний запит вибору. Відкрийте кнопку з групи ще раз.');
+    const request = this.store.userPick(requestId);
+    if (!request || request.user_id !== message.from.id) throw new UserError('Цей запит вибору застарів або належить іншій людині. Відкрийте кнопку з групи ще раз.');
+    const previous = this.store.draftReceipt(update.update_id);
+    if (previous?.id === request.draft_id && previous.userId === message.from.id) return this.selectionComplete(previous, message.chat.id);
+    const d = this.store.draft(request.draft_id);
+    if (request.consumed || !d || d.userId !== message.from.id || d.stage !== 'assignee' || !this.p.allowed(d.chatId)) throw new UserError('Крок вибору вже змінився. Поверніться до групи та відкрийте актуальний вибір.');
+    const users = message.users_shared.users;
+    if (!Array.isArray(users) || users.length !== 1 || !Number.isSafeInteger(users[0].user_id) || users[0].user_id <= 0) throw new UserError('Оберіть одну людину.');
+    let member;
+    try { member = await this.p.telegram.call('getChatMember', { chat_id: d.chatId, user_id: users[0].user_id }); }
+    catch (error) {
+      if (![400,403].includes(error.code)) throw error;
+      throw new UserError('Не вдалося перевірити, чи ця людина є учасником групи. Надайте боту права адміністратора або напишіть /task відповіддю на її повідомлення у групі.');
+    }
+    if (!activeMember(member) || !member.user || member.user.id !== users[0].user_id || member.user.is_bot) throw new UserError('Оберіть людину, яка зараз є учасником цієї групи.');
+    const latest = this.store.draft(d.id);
+    if (!latest || latest.stage !== 'assignee' || !this.p.allowed(latest.chatId)) throw new UserError('Крок уже змінився. Поверніться до групи.');
+    const next = this.store.transitionDraft(latest.id, latest.revision, update.update_id, draft => {
+      this.store.remember(member.user, draft.chatId);
+      draft.assigneeId = member.user.id;
+      draft.assigneeName = [member.user.first_name,member.user.last_name].filter(Boolean).join(' ') || String(member.user.id);
+      draft.stage = 'date';
+      this.store.consumeUserPick(requestId);
+    });
+    if (!next) throw new UserError('Крок уже змінився. Поверніться до групи.');
+    return this.selectionComplete(next, message.chat.id);
+  }
+  async selectionComplete(draft, privateChatId) {
+    await this.render(draft);
+    return this.p.telegram.send(privateChatId,
+      `✅ Виконавець: <b>${escapeHtml(draft.assigneeName)}</b>.\n\nПоверніться до групи, де створюєте завдання, та продовжіть налаштування дати й часу.`, { reply_markup: { remove_keyboard: true } });
   }
   async text(update, message) {
     const previous = this.store.draftReceipt(update.update_id);

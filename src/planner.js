@@ -115,6 +115,13 @@ export class Planner {
       return this.telegram.send(message.chat.id, '✅ Цю групу дозволено власником бота.', { reply_markup: this.menuButtons(), ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}) });
     }
     this.observe(message);
+    if (message.users_shared && message.from && !message.from.is_bot && !message.sender_chat) {
+      try { return await this.wizard.picked(update, message); }
+      catch (error) {
+        if (!(error instanceof UserError)) throw error;
+        return this.telegram.send(message.chat.id, `ℹ️ ${escapeHtml(error.message)}`, message.message_thread_id ? { message_thread_id: message.message_thread_id } : {});
+      }
+    }
     if (!message?.text || !message.from || message.from.is_bot || message.sender_chat ||
       !['private', 'group', 'supergroup'].includes(message.chat.type) || !this.allowed(message.chat.id)) return;
     const match = /^\/(\w+)(?:@([\w]+))?(?:\s+([\s\S]*))?$/.exec(message.text.trim());
@@ -136,6 +143,7 @@ export class Planner {
       switch (command) {
         case 'start':
           this.store.remember(message.from, message.chat.id, message.chat.type === 'private');
+          if (/^pick_[a-f0-9]{12}$/.test(args)) return await this.wizard.openPicker(args.slice(5), message);
           return this.menu(message.chat.id, message.message_thread_id);
         case 'menu': return this.menu(message.chat.id, message.message_thread_id);
         case 'help': return send(this.help());
