@@ -1,6 +1,6 @@
 {
   "name": "telegram-task-planner",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Ukrainian Telegram task planner with persistent reminders and ngrok webhooks",
   "type": "module",

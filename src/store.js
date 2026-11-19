@@ -138,6 +138,13 @@ export class Store {
     return this.db.prepare(`SELECT t.*, u.name AS assignee_name FROM tasks t JOIN users u ON u.id=t.assignee_id
       WHERE status='open' AND ${clauses.join(' AND ')} ORDER BY due_at,t.id LIMIT 11 OFFSET ?`).all(...params, offset);
   }
+  visibleTasks(chatId, userId, offset = 0) {
+    const condition = chatId < 0 ? 't.chat_id=?' : '(t.creator_id=? OR t.assignee_id=?)';
+    const parameters = chatId < 0 ? [chatId] : [userId, userId];
+    return this.db.prepare(`SELECT t.*,u.name AS assignee_name FROM tasks t JOIN users u ON u.id=t.assignee_id
+      WHERE ${condition} ORDER BY CASE t.status WHEN 'open' THEN 0 WHEN 'done' THEN 1 ELSE 2 END,t.due_at,t.id LIMIT 11 OFFSET ?`)
+      .all(...parameters, offset);
+  }
   previousAction(updateId) {
     const row = this.db.prepare('SELECT result FROM actions WHERE update_id=?').get(updateId);
     return row ? JSON.parse(row.result) : undefined;

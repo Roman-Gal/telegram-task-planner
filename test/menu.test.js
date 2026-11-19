@@ -128,12 +128,18 @@ test('failed prompt delivery can resume from its saved wizard transition', async
   s.telegram.send = send; await s.callback(data, author, 700);
   assert.ok(s.active().promptId);
 });
-test('created-by-me lists include authored tasks without leaking another group', async t => {
+test('the unified list includes all statuses in this group without leaking another group', async t => {
   const s = setup(t);
   s.store.createTask({ updateId:1000,chatId:chat.id,creatorId:author.id,assigneeId:buyer.id,description:'Authored',dueAt:Date.now()+100000 });
   s.store.createTask({ updateId:1001,chatId:-200,creatorId:author.id,assigneeId:buyer.id,description:'Other group secret',dueAt:Date.now()+100000 });
-  await s.callback('m:created:0');
+  s.store.createTask({ updateId:1002,chatId:chat.id,creatorId:buyer.id,assigneeId:author.id,description:'Completed item',dueAt:Date.now()+100000 });
+  s.store.changeTask(3,'done',1003);
+  await s.callback('m:tasks:0');
   assert.match(s.sent.at(-1).text, /Authored/); assert.doesNotMatch(s.sent.at(-1).text, /secret/);
+  assert.match(s.sent.at(-1).text,/Completed item/); assert.match(s.sent.at(-1).text,/✅ Виконано/);
+  const buttons=s.planner.menuButtons().inline_keyboard.flat();
+  assert.ok(buttons.some(b=>b.text==='📋 Усі завдання'));
+  assert.ok(!buttons.some(b=>/Мої завдання|Створені мною/.test(b.text)));
 });
 test('draft prompt, ownership, and expiry survive reopening the database', t => {
   const directory=mkdtempSync(join(tmpdir(),'planner-draft-')); const path=join(directory,'planner.sqlite');

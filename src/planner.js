@@ -46,8 +46,8 @@ export class Planner {
       `Собі: <code>/task me | завтра 18:30 | Купити воду</code>\n` +
       `Дати: <code>YYYY-MM-DD HH:mm</code>, <code>сьогодні HH:mm</code>, <code>завтра HH:mm</code>.\n` +
       `Часовий пояс: <b>${escapeHtml(this.config.timezone)}</b>.\n\n` +
-      `/menu — меню з кнопками\n/tasks — відкриті завдання чату\n/mine — мої завдання\n/created — створені мною\n/done ID — виконано\n/snooze ID — перенести строк на 15 хв\n/cancel ID — скасувати\n/stop — вимкнути особисті нагадування\n` +
-      `Для наступної сторінки: <code>/tasks 2</code> або <code>/mine 2</code>.\n\n` +
+      `/menu — меню з кнопками\n/tasks — усі завдання чату\n/done ID — виконано\n/snooze ID — перенести строк на 15 хв\n/cancel ID — скасувати\n/stop — вимкнути особисті нагадування\n` +
+      `Для наступної сторінки: <code>/tasks 2</code>.\n\n` +
       `Нагадування надходять у групу й особисто виконавцю. Після строку — ПРОТЕРМІНОВАНО кожні 15 хв до виконання або скасування.\n\n` +
       `Працюємо у групі або в обговоренні каналу. Анонімні повідомлення не підтримуються.`;
   }
@@ -62,8 +62,7 @@ export class Planner {
   menuButtons() {
     return { inline_keyboard: [
       [{ text: '➕ Нове завдання', callback_data: 'm:new' }],
-      [{ text: '👤 Мої завдання', callback_data: 'm:mine:0' }, { text: '📋 Завдання групи', callback_data: 'm:tasks:0' }],
-      [{ text: '📤 Створені мною', callback_data: 'm:created:0' }],
+      [{ text: '📋 Усі завдання', callback_data: 'm:tasks:0' }],
       [{ text: '❓ Довідка', callback_data: 'm:help' }],
       ...(this.username ? [[{ text: '🔔 Увімкнути приватні нагадування', url: `https://t.me/${this.username}?start=reminders` }]] : []),
     ] };
@@ -83,20 +82,18 @@ export class Planner {
       await this.telegram.send(task.chat_id, this.card(task, heading), { ...extra, ...(task.thread_id ? { message_thread_id: task.thread_id } : {}) });
     }
   }
-  async showTasks(chatId, userId, mode, page, threadId) {
+  async showTasks(chatId, userId, page, threadId) {
     if (!Number.isSafeInteger(page) || page < 0 || page > 9999) throw new UserError('Некоректний номер сторінки.');
-    const tasks = this.store.list({ chatId: chatId < 0 ? chatId : undefined,
-      assigneeId: mode === 'mine' || (chatId > 0 && mode === 'tasks') ? userId : undefined,
-      creatorId: mode === 'created' ? userId : undefined, offset: page * 10 });
-    const labels = { tasks: 'Завдання чату', mine: 'Мої завдання', created: 'Створені мною' };
-    const lines = tasks.slice(0,10).map(t => `<b>#${t.id}</b> ${priorities[t.priority].split(' ')[0]} ${mention(t)} — ${escapeHtml(t.description.slice(0,100))}\n⏰ ${escapeHtml(formatWhen(t.due_at, this.config.timezone))}${t.due_at <= Date.now() ? ' · ПРОТЕРМІНОВАНО' : ''}`);
+    const tasks = this.store.visibleTasks(chatId, userId, page * 10);
+    const status = t => t.status === 'done' ? '✅ Виконано' : t.status === 'cancelled' ? '✖️ Скасовано' : t.due_at <= Date.now() ? '🔴 ПРОТЕРМІНОВАНО' : '🕒 Відкрите';
+    const lines = tasks.slice(0,10).map(t => `<b>#${t.id}</b> ${priorities[t.priority].split(' ')[0]} ${mention(t)} — ${escapeHtml(t.description.slice(0,100))}\n⏰ ${escapeHtml(formatWhen(t.due_at, this.config.timezone))}\n${status(t)}`);
     const rows = tasks.slice(0,10).map(t => [{ text: `Відкрити #${t.id} · ${t.description.slice(0,35)}`, callback_data: `view:${t.id}` }]);
     const nav = [];
-    if (page > 0) nav.push({ text: '◀️', callback_data: `m:${mode}:${page-1}:${userId}` });
-    if (tasks.length > 10) nav.push({ text: '▶️', callback_data: `m:${mode}:${page+1}:${userId}` });
+    if (page > 0) nav.push({ text: '◀️', callback_data: `m:tasks:${page-1}` });
+    if (tasks.length > 10) nav.push({ text: '▶️', callback_data: `m:tasks:${page+1}` });
     if (nav.length) rows.push(nav);
     rows.push([{ text: '➕ Нове завдання', callback_data: 'm:new' }, { text: '🏠 Меню', callback_data: 'm:home' }]);
-    return this.telegram.send(chatId, `<b>📋 ${labels[mode]} · сторінка ${page+1}</b>\n\n${lines.length ? lines.join('\n\n') : 'Відкритих завдань на цій сторінці немає.'}`, {
+    return this.telegram.send(chatId, `<b>📋 Усі завдання · сторінка ${page+1}</b>\n\n${lines.length ? lines.join('\n\n') : 'Завдань на цій сторінці немає.'}`, {
       reply_markup: { inline_keyboard: rows }, ...(threadId ? { message_thread_id: threadId } : {}),
     });
   }
@@ -162,7 +159,7 @@ export class Planner {
         case 'mine': case 'created': {
           const page = args ? Number(args) : 1;
           if (!Number.isSafeInteger(page) || page < 1 || page > 10000) throw new UserError('Номер сторінки має бути від 1 до 10000.');
-          return this.showTasks(message.chat.id, message.from.id, command, page-1, message.message_thread_id);
+          return this.showTasks(message.chat.id, message.from.id, page-1, message.message_thread_id);
         }
         case 'done': case 'cancel': case 'snooze': {
           if (command === 'cancel' && !args) return await this.wizard.cancel(update.update_id, message.from.id, message.chat.id, message.message_thread_id || 0);
@@ -245,7 +242,7 @@ export class Planner {
           case 'home': return this.menu(q.message.chat.id, q.message.message_thread_id);
           case 'join': return this.menu(q.message.chat.id, q.message.message_thread_id); // Older pinned menus still open the updated menu.
           case 'help': return this.telegram.send(q.message.chat.id, this.help(), q.message.message_thread_id ? { message_thread_id: q.message.message_thread_id } : {});
-          default: return this.showTasks(q.message.chat.id, q.from.id, action, Number(page), q.message.message_thread_id);
+          default: return this.showTasks(q.message.chat.id, q.from.id, Number(page), q.message.message_thread_id);
         }
       }
       const view = /^view:(\d+)$/.exec(q.data || '');

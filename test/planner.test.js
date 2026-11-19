@@ -76,13 +76,13 @@ test('private tasks cannot assign another user through a reply', async t => {
   await planner.handle(message(2, '/task me | завтра 18:30 | Вода', author, author.id));
   assert.equal(store.task(1).assignee_id, author.id);
 });
-test('group /mine stays in the current group; private /mine includes own tasks across groups', async t => {
+test('group task list stays in its group; private task list includes only related tasks', async t => {
   const { planner, sent } = setup(t);
   await create(planner, 1, -100);
   await planner.handle(message(2, '/task me | завтра 18:30 | Секретна задача', assignee, -200));
-  await planner.handle(message(3, '/mine', assignee, -100));
+  await planner.handle(message(3, '/tasks', assignee, -100));
   assert.doesNotMatch(sent.at(-1).text, /Секретна/);
-  await planner.handle(message(4, '/mine', assignee, assignee.id));
+  await planner.handle(message(4, '/tasks', assignee, assignee.id));
   assert.match(sent.at(-1).text, /Секретна/);
 });
 test('bot mentions, anonymous authors, channels, and disallowed groups are ignored', async t => {
