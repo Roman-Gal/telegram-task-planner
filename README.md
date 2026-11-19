@@ -53,6 +53,14 @@ ALLOWED_CHAT_IDS=
 ngrok config add-authtoken YOUR_NGROK_AUTHTOKEN
 ```
 
+Якщо ngrok встановлено локально в `.tools/ngrok/ngrok.exe`, скрипт запуску знайде його без додавання до PATH. Для цього варіанта налаштуйте локальний файл конфігурації:
+
+```powershell
+.\.tools\ngrok\ngrok.exe config add-authtoken YOUR_NGROK_AUTHTOKEN --config .\.tools\ngrok\ngrok.yml
+```
+
+Каталог `.tools/` із програмою та особистою конфігурацією виключений із Git. Якщо локального `ngrok.yml` немає, використовується стандартна конфігурація ngrok.
+
 ### Автоматичний тунель і запуск
 
 ```powershell

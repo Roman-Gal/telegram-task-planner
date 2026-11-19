@@ -3,7 +3,10 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
 if (-not (Test-Path -LiteralPath '.env')) { throw 'Copy .env.example to .env and fill TELEGRAM_BOT_TOKEN and WEBHOOK_SECRET first.' }
 $ngrokCommand = Get-Command ngrok -ErrorAction SilentlyContinue
-if (-not $ngrokCommand) { throw 'Install ngrok, add it to PATH, and configure: ngrok config add-authtoken YOUR_TOKEN' }
+$localNgrok = Join-Path $projectRoot '.tools\ngrok\ngrok.exe'
+$ngrokExecutable = if ($ngrokCommand) { $ngrokCommand.Source } elseif (Test-Path -LiteralPath $localNgrok) { $localNgrok } else { $null }
+if (-not $ngrokExecutable) { throw 'Install ngrok in PATH or .tools\ngrok\ngrok.exe, then configure its authtoken.' }
+$ngrokConfig = Join-Path $projectRoot '.tools\ngrok\ngrok.yml'
 $portLine = Get-Content -LiteralPath '.env' | Where-Object { $_ -match '^\s*PORT\s*=' } | Select-Object -Last 1
 $plannerPort = if ($portLine) { ($portLine -split '=',2)[1].Trim().Trim('"').Trim("'") } else { '8080' }
 if ($plannerPort -notmatch '^\d+$' -or [int]$plannerPort -lt 1 -or [int]$plannerPort -gt 65535) { throw 'Invalid PORT in .env.' }
@@ -15,7 +18,9 @@ try {
     if ($_.Exception.Message -like 'An ngrok agent*') { throw }
 }
 $previousUrl = $env:PUBLIC_BASE_URL
-$ngrokProcess = Start-Process -FilePath $ngrokCommand.Source -ArgumentList @('http', $plannerPort, '--log=data/ngrok.log', '--log-format=json') -WindowStyle Hidden -PassThru
+$ngrokArguments = @('http', $plannerPort, '--log=data/ngrok.log', '--log-format=json')
+if (Test-Path -LiteralPath $ngrokConfig) { $ngrokArguments += '--config=.tools/ngrok/ngrok.yml' }
+$ngrokProcess = Start-Process -FilePath $ngrokExecutable -ArgumentList $ngrokArguments -WindowStyle Hidden -PassThru
 try {
     $tunnelUrl = $null
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
